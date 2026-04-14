@@ -9,19 +9,78 @@ require_once __DIR__ . '/src/BookmarkExporter.php';
 
 // ── Constants ────────────────────────────────────────────────────────────────
 const BROWSERS = [
-    'firefox' => ['label' => 'Firefox', 'icon' => '🦊', 'ext' => 'json',      'hint' => 'JSON-Datei (.json)'],
-    'chrome'  => ['label' => 'Chrome',  'icon' => '🌐', 'ext' => 'html|htm',  'hint' => 'HTML-Datei (.html)'],
-    'safari'  => ['label' => 'Safari',  'icon' => '🧭', 'ext' => 'html|htm',  'hint' => 'HTML-Datei (.html)'],
+    'firefox' => ['label' => 'Firefox', 'icon' => '🦊', 'hint' => 'JSON- oder HTML-Datei'],
+    'chrome'  => ['label' => 'Chrome',  'icon' => '🌐', 'hint' => 'HTML-Datei (.html)'],
+    'safari'  => ['label' => 'Safari',  'icon' => '🧭', 'hint' => 'HTML-Datei (.html)'],
 ];
+
+const UPLOAD_DIR = __DIR__ . '/uploads';
+const MAX_AGE    = 86400; // 24 h – cleanup old uploads
+
+// ── Helpers (early, needed during POST) ─────────────────────────────────────
+function h(string $s): string {
+    return htmlspecialchars($s, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+}
+
+/**
+ * Auto-detect whether content is Firefox JSON or Netscape HTML and parse it.
+ */
+function parseAuto(string $content, string $browser): array {
+    $trimmed = ltrim($content);
+    if ($trimmed !== '' && $trimmed[0] === '{') {
+        // JSON → Firefox format
+        return BookmarkParser::parseFirefox($content);
+    }
+    // HTML → Netscape format (Chrome, Safari, Firefox HTML export)
+    return BookmarkParser::parseHtml($content);
+}
+
+/**
+ * Save a file to the session upload directory and return its path.
+ */
+function saveUpload(string $sessionDir, string $browser, string $content): string {
+    if (!is_dir($sessionDir)) {
+        mkdir($sessionDir, 0755, true);
+    }
+    $path = $sessionDir . '/' . $browser . '.dat';
+    file_put_contents($path, $content);
+    return $path;
+}
+
+/**
+ * Remove upload directories older than MAX_AGE seconds.
+ */
+function cleanupOldUploads(): void {
+    $entries = glob(UPLOAD_DIR . '/sess_*', GLOB_ONLYDIR);
+    if (!$entries) return;
+    $cutoff = time() - MAX_AGE;
+    foreach ($entries as $dir) {
+        if (filemtime($dir) < $cutoff) {
+            array_map('unlink', glob($dir . '/*'));
+            @rmdir($dir);
+        }
+    }
+}
 
 // ── Handle POST (upload) ─────────────────────────────────────────────────────
 $errors  = [];
 $result  = null;
 
+// Periodic cleanup of old upload directories
+cleanupOldUploads();
+
+// Session-based upload directory
+$sessionDir = UPLOAD_DIR . '/sess_' . session_id();
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     if (isset($_POST['reset'])) {
-        unset($_SESSION['sync_result']);
+        // Remove uploaded files for this session
+        if (is_dir($sessionDir)) {
+            array_map('unlink', glob($sessionDir . '/*'));
+            rmdir($sessionDir);
+        }
+        unset($_SESSION['sync_result'], $_SESSION['uploaded_files']);
         header('Location: ' . $_SERVER['PHP_SELF']);
         exit;
     }
@@ -32,7 +91,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $file = $_FILES[$key] ?? null;
 
         if (!$file || $file['error'] === UPLOAD_ERR_NO_FILE) {
-            continue; // optional – skip if not uploaded
+            // Re-use previously stored file for this browser if available
+            $stored = $_SESSION['uploaded_files'][$key] ?? null;
+            if ($stored && file_exists($stored)) {
+                $content = file_get_contents($stored);
+                if ($content !== false) {
+                    try {
+                        $sources[$key] = parseAuto($content, $key);
+                    } catch (\Throwable) {}
+                }
+            }
+            continue;
         }
 
         if ($file['error'] !== UPLOAD_ERR_OK) {
@@ -52,20 +121,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
 
         try {
-            if ($key === 'firefox') {
-                $bookmarks = BookmarkParser::parseFirefox($content);
-            } else {
-                $bookmarks = BookmarkParser::parseHtml($content);
-            }
+            $bookmarks = parseAuto($content, $key);
 
             if (empty($bookmarks)) {
                 $errors[] = "{$meta['label']}: Keine Lesezeichen gefunden. Prüfe das Dateiformat.";
                 continue;
             }
 
+            // Persist file on server
+            $path = saveUpload($sessionDir, $key, $content);
+            $_SESSION['uploaded_files'][$key] = $path;
+
             $sources[$key] = $bookmarks;
         } catch (\Throwable $e) {
-            $errors[] = "{$meta['label']}: Fehler beim Verarbeiten – " . htmlspecialchars($e->getMessage());
+            $errors[] = "{$meta['label']}: Fehler beim Verarbeiten – " . h($e->getMessage());
         }
     }
 
@@ -84,10 +153,6 @@ if ($result === null && isset($_SESSION['sync_result'])) {
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
-function h(string $s): string {
-    return htmlspecialchars($s, ENT_QUOTES | ENT_HTML5, 'UTF-8');
-}
-
 function browserBadges(array $entry, array $browsers): string {
     $out = '';
     foreach ($browsers as $b) {
@@ -137,7 +202,7 @@ function browserBadges(array $entry, array $browsers): string {
 
       <div class="alert alert-info">
         <strong>Export-Anleitung:</strong><br>
-        <strong>Firefox:</strong> Bibliothek → Lesezeichen → Alle Lesezeichen anzeigen → Import und Sicherung → Lesezeichen in JSON exportieren<br>
+        <strong>Firefox:</strong> Lesezeichen-Menü → Alle Lesezeichen anzeigen → Import und Sicherung → Als HTML exportieren <em>oder</em> In JSON exportieren<br>
         <strong>Chrome:</strong> Lesezeichen-Manager (⋮) → Lesezeichen exportieren (.html)<br>
         <strong>Safari:</strong> Ablage → Lesezeichen exportieren (.html)
       </div>
