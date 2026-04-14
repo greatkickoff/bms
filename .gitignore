@@ -1,0 +1,14 @@
+# PHP
+*.log
+/vendor/
+
+# Uploaded files
+/uploads/*
+!/uploads/.gitkeep
+
+# Environment / IDE
+.env
+.DS_Store
+.idea/
+.vscode/
+*.swp
