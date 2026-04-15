@@ -97,43 +97,47 @@ display dialog "Entpackter Ordner:" & return & extractedFolderPath buttons {"OK"
 
 
 -- ============================================================
--- SCHRITT 4: Gesamten Ordner via FTP hochladen
+-- SCHRITT 4: Gesamten Ordner via FTP hochladen (nur neue Dateien)
 -- ============================================================
--- curl lädt jede Datei einzeln hoch und erhält dabei die Ordnerstruktur.
--- „find" listet alle Dateien rekursiv auf.
--- Der relative Pfad (ohne den lokalen Prefix) wird als FTP-Pfad verwendet,
--- damit die Ordnerstruktur auf dem Server identisch ist.
--- „--ftp-create-dirs" legt fehlende Unterordner auf dem Server automatisch an.
+-- Vor jedem Upload wird geprüft, ob die Datei auf dem FTP-Server
+-- bereits existiert (curl --head sendet einen FTP SIZE-Befehl).
+-- Exit-Code 0 → Datei vorhanden → überspringen.
+-- Exit-Code != 0 → Datei fehlt → hochladen.
+-- So wird kein einzige bestehende Datei auf dem Server überschrieben.
 
 set ftpURL to "ftp://" & ftpHost & ":" & ftpPort & ftpRemotePath
 
-display dialog "Starte FTP-Upload nach:" & return & ftpURL & return & return & "Quelle: " & extractedFolderPath buttons {"OK"} default button "OK"
+display dialog "Starte FTP-Upload nach:" & return & ftpURL & return & return & ¬
+    "Quelle: " & extractedFolderPath & return & return & ¬
+    "Bereits vorhandene Dateien werden übersprungen." buttons {"OK"} default button "OK"
 
 try
-    -- Shell-Skript: alle Dateien im entpackten Ordner finden und einzeln hochladen
-    -- ${file#<prefix>/} schneidet den lokalen Pfad-Prefix ab → relativer Pfad
+    -- Shell-Skript:
+    --   1. Alle lokalen Dateien rekursiv auflisten
+    --   2. Für jede Datei: per curl --head prüfen ob sie auf dem FTP-Server existiert
+    --      curl --head sendet bei FTP intern den SIZE-Befehl; liefert Exit-Code 0 wenn
+    --      die Datei gefunden wurde, andernfalls Exit-Code 19 (= nicht gefunden).
+    --   3. Nur hochladen wenn die Datei NICHT vorhanden ist (exit != 0)
+    set ftpCredentials to quoted form of (ftpUser & ":" & ftpPassword)
+
     set uploadScript to "find " & quoted form of extractedFolderPath & ¬
         " -type f" & ¬
         " | while IFS= read -r file; do" & ¬
         "   relative=\"${file#" & extractedFolderPath & "/}\";" & ¬
-        "   curl --silent --show-error" & ¬
-        "     -u " & quoted form of (ftpUser & ":" & ftpPassword) & ¬
-        "     --ftp-create-dirs" & ¬
-        "     -T \"$file\"" & ¬
-        "     \"" & ftpURL & "$relative\";" & ¬
+        "   remoteURL=\"" & ftpURL & "$relative\";" & ¬
+        "   if curl --silent --head -u " & ftpCredentials & " \"$remoteURL\" >/dev/null 2>&1; then" & ¬
+        "     echo \"SKIP (exists): $relative\";" & ¬
+        "   else" & ¬
+        "     echo \"UPLOAD: $relative\";" & ¬
+        "     curl --silent --show-error -u " & ftpCredentials & " --ftp-create-dirs -T \"$file\" \"$remoteURL\";" & ¬
+        "   fi;" & ¬
         " done 2>&1"
 
     do shell script uploadScript
     set uploadOutput to result
 
-    if uploadOutput is "" then
-        display dialog "FTP-Upload erfolgreich abgeschlossen!" & return & ¬
-            "Alle Dateien wurden nach " & ftpURL & " hochgeladen." ¬
-            buttons {"OK"} default button "OK" with icon note
-    else
-        display dialog "FTP-Upload abgeschlossen (mit Meldungen):" & return & uploadOutput ¬
-            buttons {"OK"} default button "OK"
-    end if
+    display dialog "FTP-Upload abgeschlossen!" & return & return & uploadOutput ¬
+        buttons {"OK"} default button "OK" with icon note
 
 on error errMsg
     display dialog "Fehler beim FTP-Upload:" & return & errMsg buttons {"OK"} default button "OK" with icon stop
