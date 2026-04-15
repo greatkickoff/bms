@@ -7,15 +7,14 @@
  * [
  *   'url'    => string,
  *   'title'  => string,
- *   'folder' => string,   // folder path, e.g. "Toolbar > News"
+ *   'folder' => string,   // full folder path, e.g. "Toolbar > News > Tech"
  *   'added'  => int,      // unix timestamp (0 if unknown)
  * ]
  */
 class BookmarkParser
 {
-    /**
-     * Parse a Firefox bookmark export (JSON, Mozilla Places format).
-     */
+    // ── Firefox JSON (Mozilla Places format) ─────────────────────────────────
+
     public static function parseFirefox(string $content): array
     {
         $data = json_decode($content, true);
@@ -33,7 +32,6 @@ class BookmarkParser
 
         if ($type === 'text/x-moz-place') {
             $uri = $node['uri'] ?? '';
-            // Skip separators, javascript: URIs and empty entries
             if ($uri === '' || str_starts_with($uri, 'javascript:') || str_starts_with($uri, 'place:')) {
                 return;
             }
@@ -45,130 +43,154 @@ class BookmarkParser
                 'added'  => $addedRaw > 0 ? (int)($addedRaw / 1_000_000) : 0,
             ];
         } elseif ($type === 'text/x-moz-place-container') {
-            $title = $node['title'] ?? '';
-            // Skip the synthetic root containers (empty title = placesRoot)
-            if ($title === '') {
-                $newPath = $path;
-            } else {
-                $newPath = $path !== '' ? $path . ' > ' . $title : $title;
-            }
+            $title   = $node['title'] ?? '';
+            $newPath = ($title === '') ? $path : ($path !== '' ? $path . ' > ' . $title : $title);
             foreach ($node['children'] ?? [] as $child) {
                 self::walkFirefoxNode($child, $newPath, $out);
             }
         }
     }
 
+    // ── Netscape HTML (Chrome / Safari / Firefox HTML export) ────────────────
+
     /**
-     * Parse a Chrome or Safari bookmark export (Netscape HTML format).
+     * Pure token-based parser for the Netscape Bookmark HTML format.
+     *
+     * Why not DOMDocument?
+     * DOMDocument re-nests <DL> tags inside <DT> elements (because DT has no
+     * explicit close tag in Netscape files), causing the entire folder tree to
+     * collapse. A token-based pass over the raw text is far more reliable.
      */
     public static function parseHtml(string $content): array
     {
-        // DOMDocument is strict; suppress warnings from the non-standard Netscape format
-        $dom = new \DOMDocument('1.0', 'UTF-8');
-        libxml_use_internal_errors(true);
-        $dom->loadHTML('<?xml encoding="UTF-8">' . $content);
-        libxml_clear_errors();
+        // ── Pre-processing ───────────────────────────────────────────────────
+        // Normalise line endings
+        $content = str_replace("\r\n", "\n", str_replace("\r", "\n", $content));
 
-        $bookmarks = [];
+        // Remove base64 ICON data – can be 100 KB per bookmark, causes catastrophic
+        // backtracking and is useless for our purposes.
+        $content = preg_replace('/\s+ICON="data:[^"]*"/i', '', $content);
 
-        // The root <DL> is the first one in the document
-        $dlList = $dom->getElementsByTagName('dl');
-        if ($dlList->length === 0) {
-            // Fallback: try to parse with regex
-            return self::parseHtmlRegex($content);
+        // Strip HTML comments
+        $content = preg_replace('/<!--.*?-->/s', '', $content);
+
+        // ── Tokenise ─────────────────────────────────────────────────────────
+        // Split into alternating [text, tag, text, tag, …] pieces.
+        // PREG_SPLIT_DELIM_CAPTURE keeps the tags in the output array.
+        $tokens = preg_split('/(<[^>]+>)/s', $content, -1,
+            PREG_SPLIT_DELIM_CAPTURE | PREG_SPLIT_NO_EMPTY);
+
+        if ($tokens === false) {
+            return [];
         }
 
-        self::walkNetscapeNode($dlList->item(0), [], $bookmarks);
-        return $bookmarks;
-    }
+        // ── State machine ─────────────────────────────────────────────────────
+        $bookmarks = [];
 
-    /**
-     * Walk a <DL> element and collect bookmarks recursively.
-     * In Netscape format, inside a <DL>:
-     *   - <DT><H3>Folder</H3>  followed by sibling <DL>...</DL>
-     *   - <DT><A HREF="...">Title</A>
-     */
-    private static function walkNetscapeNode(\DOMNode $dl, array $folderPath, array &$out): void
-    {
-        $pendingFolder = null;
+        // folderByDepth[depth] = full path string at that DL nesting level.
+        // Depth 0 is the document root (before any DL is opened).
+        $folderByDepth  = [0 => ''];
+        $depth          = 0;
+        $pendingFolder  = null;   // folder name waiting for the next <DL>
 
-        foreach ($dl->childNodes as $node) {
-            if ($node->nodeType !== XML_ELEMENT_NODE) {
+        $inA     = false;
+        $inH3    = false;
+        $aHref   = '';
+        $aAdded  = 0;
+        $aBuf    = '';   // accumulates text content of current <A>
+        $h3Buf   = '';   // accumulates text content of current <H3>
+
+        foreach ($tokens as $tok) {
+            // ── Plain text ───────────────────────────────────────────────────
+            if ($tok === '' || $tok[0] !== '<') {
+                if ($inA)  $aBuf  .= $tok;
+                if ($inH3) $h3Buf .= $tok;
                 continue;
             }
-            $tag = strtolower($node->nodeName);
 
-            if ($tag === 'dt') {
-                // Find the first element child (H3 or A)
-                $child = self::firstElementChild($node);
-                if ($child === null) {
-                    continue;
-                }
-                $childTag = strtolower($child->nodeName);
+            // ── Extract tag name (with optional leading slash) ───────────────
+            // e.g. "<DL>" → "dl",  "</DL>" → "/dl",  "<A HREF=...>" → "a"
+            $tagRaw = '';
+            if (preg_match('/^<\s*(\/?\s*[\w]+)/i', $tok, $tm)) {
+                $tagRaw = strtolower(trim($tm[1]));
+            }
 
-                if ($childTag === 'a') {
-                    $href = $child->getAttribute('href');
-                    if ($href && !str_starts_with($href, 'javascript:')) {
-                        $addDate = (int)($child->getAttribute('add_date') ?: 0);
-                        $out[] = [
-                            'url'    => $href,
-                            'title'  => trim($child->textContent),
-                            'folder' => implode(' > ', $folderPath),
-                            'added'  => $addDate,
+            switch ($tagRaw) {
+
+                // ── <DL> : enter a new folder level ──────────────────────────
+                case 'dl':
+                    $depth++;
+                    if ($pendingFolder !== null) {
+                        $parent = $folderByDepth[$depth - 1] ?? '';
+                        $folderByDepth[$depth] = $parent !== ''
+                            ? $parent . ' > ' . $pendingFolder
+                            : $pendingFolder;
+                        $pendingFolder = null;
+                    } else {
+                        // No folder header before this DL: inherit parent path
+                        $folderByDepth[$depth] = $folderByDepth[$depth - 1] ?? '';
+                    }
+                    break;
+
+                // ── </DL> : leave folder level ────────────────────────────────
+                case '/dl':
+                    unset($folderByDepth[$depth]);
+                    if ($depth > 0) $depth--;
+                    break;
+
+                // ── <H3> : start of a folder name ────────────────────────────
+                case 'h3':
+                    $inH3  = true;
+                    $h3Buf = '';
+                    break;
+
+                // ── </H3> : folder name complete ─────────────────────────────
+                case '/h3':
+                    $inH3         = false;
+                    $pendingFolder = html_entity_decode(
+                        trim(strip_tags($h3Buf)), ENT_QUOTES | ENT_HTML5, 'UTF-8'
+                    );
+                    break;
+
+                // ── <A> : start of a bookmark ────────────────────────────────
+                case 'a':
+                    $inA   = true;
+                    $aBuf  = '';
+                    $aHref = '';
+                    $aAdded = 0;
+
+                    // href – try double-quotes first, then single quotes
+                    if (preg_match('/\bhref="([^"]*)"/i', $tok, $m)) {
+                        $aHref = html_entity_decode($m[1], ENT_QUOTES | ENT_HTML5, 'UTF-8');
+                    } elseif (preg_match("/\\bhref='([^']*)'/i", $tok, $m)) {
+                        $aHref = html_entity_decode($m[1], ENT_QUOTES | ENT_HTML5, 'UTF-8');
+                    }
+
+                    // add_date
+                    if (preg_match('/\badd_date="(\d+)"/i', $tok, $m)) {
+                        $aAdded = (int)$m[1];
+                    }
+                    break;
+
+                // ── </A> : emit bookmark ──────────────────────────────────────
+                case '/a':
+                    $inA = false;
+                    if ($aHref !== '' && !str_starts_with(strtolower($aHref), 'javascript:')) {
+                        $folder = $folderByDepth[$depth] ?? ($folderByDepth ? end($folderByDepth) : '');
+                        $title  = html_entity_decode(
+                            trim(strip_tags($aBuf)), ENT_QUOTES | ENT_HTML5, 'UTF-8'
+                        );
+                        $bookmarks[] = [
+                            'url'    => $aHref,
+                            'title'  => $title !== '' ? $title : $aHref,
+                            'folder' => $folder,
+                            'added'  => $aAdded,
                         ];
                     }
-                    $pendingFolder = null;
-                } elseif ($childTag === 'h3') {
-                    $pendingFolder = trim($child->textContent);
-                }
-            } elseif ($tag === 'dl' && $pendingFolder !== null) {
-                // This DL belongs to the folder named in $pendingFolder
-                $newPath = array_merge($folderPath, [$pendingFolder]);
-                self::walkNetscapeNode($node, $newPath, $out);
-                $pendingFolder = null;
-            } elseif ($tag === 'dl' && $pendingFolder === null) {
-                // Nested DL without a preceding folder header – treat as continuation
-                self::walkNetscapeNode($node, $folderPath, $out);
+                    break;
             }
         }
-    }
 
-    /** Returns the first element child of a DOMNode, or null. */
-    private static function firstElementChild(\DOMNode $node): ?\DOMElement
-    {
-        foreach ($node->childNodes as $child) {
-            if ($child->nodeType === XML_ELEMENT_NODE) {
-                return $child;
-            }
-        }
-        return null;
-    }
-
-    /**
-     * Regex-based fallback for malformed HTML.
-     */
-    private static function parseHtmlRegex(string $content): array
-    {
-        $bookmarks = [];
-        // Match <A HREF="..." ...>Title</A> – capture href, add_date, title
-        preg_match_all(
-            '/<a\s[^>]*href="([^"]+)"[^>]*(?:add_date="(\d+)")?[^>]*>([^<]*)<\/a>/i',
-            $content,
-            $matches,
-            PREG_SET_ORDER
-        );
-        foreach ($matches as $m) {
-            $href = $m[1];
-            if (str_starts_with($href, 'javascript:')) {
-                continue;
-            }
-            $bookmarks[] = [
-                'url'    => $href,
-                'title'  => html_entity_decode(trim($m[3]), ENT_QUOTES | ENT_HTML5, 'UTF-8'),
-                'folder' => '',
-                'added'  => (int)($m[2] ?? 0),
-            ];
-        }
         return $bookmarks;
     }
 }

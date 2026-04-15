@@ -299,84 +299,154 @@ function browserBadges(array $entry, array $browsers): string {
       <div class="section-title">🔍 Unterschiede &amp; alle Lesezeichen</div>
 
       <div class="diff-controls">
+        <!-- Filter chips -->
         <span class="filter-chip active" data-filter="all">Alle (<?= count($merged) ?>)</span>
 
         <?php if (count($browsers) > 1): ?>
-          <span class="filter-chip" data-filter="in_all"
-                title="In allen hochgeladenen Browsern vorhanden">
-            In allen (<?= $stats['in_all'] ?>)
-          </span>
-          <span class="filter-chip" data-filter="unique"
-                title="Nur in einem Browser vorhanden">
-            Nur in einem (<?= $stats['unique_to_one'] ?>)
-          </span>
+          <span class="filter-chip" data-filter="in_all">In allen (<?= $stats['in_all'] ?>)</span>
+          <span class="filter-chip" data-filter="unique">Nur in einem (<?= $stats['unique_to_one'] ?>)</span>
         <?php endif; ?>
 
         <?php foreach ($browsers as $b): ?>
-          <?php $onlyKey = $b; // rows where ONLY this browser has it ?>
-          <span class="filter-chip" data-filter="only_<?= $b ?>"
-                style="--chip-color: var(--<?= $b ?>)"
-                title="Nur in <?= BROWSERS[$b]['label'] ?>">
+          <span class="filter-chip" data-filter="only_<?= $b ?>">
             Nur <?= BROWSERS[$b]['icon'] ?> <?= BROWSERS[$b]['label'] ?>
             (<?= count(array_filter($merged, fn($e) => array_keys($e['sources']) === [$b])) ?>)
           </span>
         <?php endforeach; ?>
 
-        <div class="search-box">
-          <span class="search-icon">🔍</span>
-          <input type="text" id="search-input" placeholder="Suchen…" autocomplete="off">
+        <!-- View toggle -->
+        <div class="view-toggle" style="margin-left:auto; display:flex; gap:.5rem; align-items:center;">
+          <button class="btn btn-secondary view-btn active" data-view="grouped" title="Ordner-Baum">
+            🗂 Ordner
+          </button>
+          <button class="btn btn-secondary view-btn" data-view="flat" title="Flache Tabelle">
+            ☰ Tabelle
+          </button>
+          <div class="search-box" style="margin-left:.5rem">
+            <span class="search-icon">🔍</span>
+            <input type="text" id="search-input" placeholder="Suchen…" autocomplete="off">
+          </div>
         </div>
       </div>
 
-      <div class="table-wrap">
-        <table id="bookmark-table">
-          <thead>
-            <tr>
-              <th class="td-title">Titel</th>
-              <th class="td-url">URL</th>
-              <th class="td-folder">Ordner</th>
-              <th class="td-browsers">Browser</th>
-            </tr>
-          </thead>
-          <tbody>
-            <?php foreach ($merged as $entry):
-              $sourcesStr = implode(',', array_keys($entry['sources']));
-              $inAll  = count($entry['sources']) === count($browsers) && count($browsers) > 1;
-              $unique = count($entry['sources']) === 1;
+      <!-- ── GROUPED VIEW ──────────────────────────────────────────────── -->
+      <div id="view-grouped">
+        <?php
+          // Build sorted folder tree
+          $grouped = [];
+          foreach ($merged as $idx => $entry) {
+              $folder = $entry['folder'] !== '' ? $entry['folder'] : '(Keine Kategorie)';
+              $grouped[$folder][] = ['idx' => $idx, 'entry' => $entry];
+          }
+          ksort($grouped);
+
+          // Helper: indent depth from path (count ' > ')
+          $depth_of = fn(string $f): int => $f === '(Keine Kategorie)' ? 0 : substr_count($f, ' > ');
+
+          // Render folder + its bookmarks
+          foreach ($grouped as $folderPath => $items):
+            $depth     = $depth_of($folderPath);
+            $segments  = $folderPath === '(Keine Kategorie)' ? ['(Keine Kategorie)'] : explode(' > ', $folderPath);
+            $leafName  = end($segments);
+            $indent    = $depth * 1.5;           // rem indentation
+            $folderId  = 'folder-' . md5($folderPath);
+        ?>
+        <div class="folder-group" data-folder="<?= h($folderPath) ?>">
+          <div class="folder-header" style="padding-left:<?= $indent ?>rem"
+               data-toggle="<?= $folderId ?>">
+            <span class="folder-toggle">▾</span>
+            <span class="folder-icon">📁</span>
+            <span class="folder-name"><?= h($leafName) ?></span>
+            <span class="folder-count"><?= count($items) ?></span>
+            <?php if ($depth > 0): ?>
+            <span class="folder-path-hint"><?= h(implode(' > ', array_slice($segments, 0, -1))) ?></span>
+            <?php endif; ?>
+          </div>
+          <div class="folder-items" id="<?= $folderId ?>">
+            <?php foreach ($items as ['idx' => $idx, 'entry' => $entry]):
+              $sourcesStr  = implode(',', array_keys($entry['sources']));
+              $inAll       = count($entry['sources']) === count($browsers) && count($browsers) > 1;
+              $unique      = count($entry['sources']) === 1;
               $onlyBrowser = $unique ? array_key_first($entry['sources']) : '';
             ?>
-            <tr class="bm-row"
-                data-sources="<?= h($sourcesStr) ?>"
-                data-in-all="<?= $inAll ? '1' : '0' ?>"
-                data-unique="<?= $unique ? '1' : '0' ?>"
-                data-only="<?= h($onlyBrowser) ?>">
-              <td class="td-title">
+            <div class="bm-row bm-card"
+                 data-sources="<?= h($sourcesStr) ?>"
+                 data-in-all="<?= $inAll ? '1' : '0' ?>"
+                 data-unique="<?= $unique ? '1' : '0' ?>"
+                 data-only="<?= h($onlyBrowser) ?>"
+                 style="padding-left:<?= $indent + 1.5 ?>rem">
+              <div class="bm-main">
                 <a href="<?= h($entry['url']) ?>"
-                   class="cell-title"
-                   target="_blank"
-                   rel="noopener noreferrer"
-                   title="<?= h($entry['title']) ?>">
+                   class="bm-title"
+                   target="_blank" rel="noopener noreferrer"
+                   title="<?= h($entry['url']) ?>">
                   <?= h($entry['title'] ?: '(kein Titel)') ?>
                 </a>
-              </td>
-              <td class="td-url">
-                <span class="cell-url" title="<?= h($entry['url']) ?>"><?= h($entry['url']) ?></span>
-              </td>
-              <td class="td-folder">
-                <span class="cell-folder" title="<?= h($entry['folder']) ?>"><?= h($entry['folder'] ?: '—') ?></span>
-              </td>
-              <td class="td-browsers">
-                <?= browserBadges($entry, $browsers) ?>
-              </td>
-            </tr>
+                <span class="bm-url"><?= h($entry['url']) ?></span>
+              </div>
+              <div class="bm-badges"><?= browserBadges($entry, $browsers) ?></div>
+            </div>
             <?php endforeach; ?>
-          </tbody>
-        </table>
-        <div class="table-footer">
-          <span id="row-count"><?= count($merged) ?> Einträge</span>
-          <span>Klicke auf einen Titel zum Öffnen</span>
+          </div>
+        </div>
+        <?php endforeach; ?>
+
+        <div class="table-footer" style="border-radius:0 0 var(--radius) var(--radius); margin-top:1px">
+          <span id="group-count"><?= count($merged) ?> Einträge in <?= count($grouped) ?> Ordnern</span>
         </div>
       </div>
+
+      <!-- ── FLAT TABLE VIEW ───────────────────────────────────────────── -->
+      <div id="view-flat" class="hidden">
+        <div class="table-wrap">
+          <table id="bookmark-table">
+            <thead>
+              <tr>
+                <th class="td-title">Titel</th>
+                <th class="td-url">URL</th>
+                <th class="td-folder">Ordner</th>
+                <th class="td-browsers">Browser</th>
+              </tr>
+            </thead>
+            <tbody>
+              <?php foreach ($merged as $entry):
+                $sourcesStr  = implode(',', array_keys($entry['sources']));
+                $inAll       = count($entry['sources']) === count($browsers) && count($browsers) > 1;
+                $unique      = count($entry['sources']) === 1;
+                $onlyBrowser = $unique ? array_key_first($entry['sources']) : '';
+              ?>
+              <tr class="bm-row"
+                  data-sources="<?= h($sourcesStr) ?>"
+                  data-in-all="<?= $inAll ? '1' : '0' ?>"
+                  data-unique="<?= $unique ? '1' : '0' ?>"
+                  data-only="<?= h($onlyBrowser) ?>">
+                <td class="td-title">
+                  <a href="<?= h($entry['url']) ?>"
+                     class="cell-title"
+                     target="_blank" rel="noopener noreferrer">
+                    <?= h($entry['title'] ?: '(kein Titel)') ?>
+                  </a>
+                </td>
+                <td class="td-url">
+                  <span class="cell-url"><?= h($entry['url']) ?></span>
+                </td>
+                <td class="td-folder">
+                  <span class="cell-folder"><?= h($entry['folder'] ?: '—') ?></span>
+                </td>
+                <td class="td-browsers">
+                  <?= browserBadges($entry, $browsers) ?>
+                </td>
+              </tr>
+              <?php endforeach; ?>
+            </tbody>
+          </table>
+          <div class="table-footer">
+            <span id="row-count"><?= count($merged) ?> Einträge</span>
+            <span>Klicke auf einen Titel zum Öffnen</span>
+          </div>
+        </div>
+      </div>
+
     </section>
 
     <?php endif; // $result !== null ?>
@@ -414,42 +484,90 @@ document.getElementById('upload-form')?.addEventListener('submit', function(e) {
   btn.disabled = true;
 });
 
-// ── Filter chips ──────────────────────────────────────────────────────────
-const chips = document.querySelectorAll('.filter-chip');
-const rows  = document.querySelectorAll('.bm-row');
-const count = document.getElementById('row-count');
+// ── View toggle ────────────────────────────────────────────────────────────
+const viewGrouped = document.getElementById('view-grouped');
+const viewFlat    = document.getElementById('view-flat');
+let   currentView = 'grouped';
+
+document.querySelectorAll('.view-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.view-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    currentView = btn.dataset.view;
+    viewGrouped.classList.toggle('hidden', currentView !== 'grouped');
+    viewFlat.classList.toggle('hidden',    currentView !== 'flat');
+    applyFilters();
+  });
+});
+
+// ── Folder collapse/expand ─────────────────────────────────────────────────
+document.querySelectorAll('.folder-header').forEach(header => {
+  header.addEventListener('click', () => {
+    const id      = header.dataset.toggle;
+    const items   = document.getElementById(id);
+    const toggle  = header.querySelector('.folder-toggle');
+    const isOpen  = !items.classList.contains('collapsed');
+    items.classList.toggle('collapsed', isOpen);
+    toggle.textContent = isOpen ? '▸' : '▾';
+  });
+});
+
+// ── Filter + search ────────────────────────────────────────────────────────
+const chips       = document.querySelectorAll('.filter-chip');
+const allRows     = document.querySelectorAll('.bm-row');
+const rowCount    = document.getElementById('row-count');
+const groupCount  = document.getElementById('group-count');
 const searchInput = document.getElementById('search-input');
 
 let activeFilter = 'all';
 let searchQuery  = '';
 
-function applyFilters() {
-  let visible = 0;
-  rows.forEach(row => {
-    const matchesFilter = checkFilter(row, activeFilter);
-    const matchesSearch = checkSearch(row, searchQuery);
-    const show = matchesFilter && matchesSearch;
-    row.classList.toggle('hidden', !show);
-    if (show) visible++;
-  });
-  if (count) count.textContent = visible + ' Einträge';
+function rowMatches(row) {
+  return checkFilter(row) && checkSearch(row);
 }
 
-function checkFilter(row, filter) {
-  if (filter === 'all')    return true;
-  if (filter === 'in_all') return row.dataset.inAll === '1';
-  if (filter === 'unique') return row.dataset.unique === '1';
-  if (filter.startsWith('only_')) {
-    const b = filter.replace('only_', '');
-    return row.dataset.only === b;
+function checkFilter(row) {
+  if (activeFilter === 'all')    return true;
+  if (activeFilter === 'in_all') return row.dataset.inAll === '1';
+  if (activeFilter === 'unique') return row.dataset.unique === '1';
+  if (activeFilter.startsWith('only_')) {
+    return row.dataset.only === activeFilter.replace('only_', '');
   }
   return true;
 }
 
-function checkSearch(row, query) {
-  if (!query) return true;
-  const text = row.textContent.toLowerCase();
-  return text.includes(query.toLowerCase());
+function checkSearch(row) {
+  if (!searchQuery) return true;
+  return row.textContent.toLowerCase().includes(searchQuery.toLowerCase());
+}
+
+function applyFilters() {
+  let visible = 0;
+
+  // Flat table rows
+  allRows.forEach(row => {
+    const show = rowMatches(row);
+    row.classList.toggle('hidden', !show);
+    if (show) visible++;
+  });
+  if (rowCount) rowCount.textContent = visible + ' Einträge';
+
+  // Grouped view: show/hide individual bm-card items and
+  // hide entire folder-group if no cards visible
+  let visibleFolders = 0;
+  document.querySelectorAll('.folder-group').forEach(group => {
+    const cards       = group.querySelectorAll('.bm-card');
+    let   groupVisible = 0;
+    cards.forEach(card => {
+      const show = rowMatches(card);
+      card.classList.toggle('hidden', !show);
+      if (show) groupVisible++;
+    });
+    const hide = groupVisible === 0;
+    group.classList.toggle('hidden', hide);
+    if (!hide) visibleFolders++;
+  });
+  if (groupCount) groupCount.textContent = visible + ' Einträge in ' + visibleFolders + ' Ordnern';
 }
 
 chips.forEach(chip => {
