@@ -1,109 +1,121 @@
 -- ============================================================
--- github_clone_ftp_upload.applescript
--- Klont ein GitHub-Repository lokal und lädt es via FTP hoch.
+-- github_download_ftp_upload.applescript
+-- Lädt ein GitHub-Repository als ZIP herunter, entpackt es
+-- im Downloads-Ordner und lädt den ganzen Inhalt via FTP hoch.
+-- Kein Git erforderlich.
 -- ============================================================
 
 
 -- ============================================================
--- KONFIGURATION – hier alle Zugangsdaten anpassen
+-- KONFIGURATION – hier alle Werte anpassen
 -- ============================================================
 
--- GitHub-Repository-URL (HTTPS oder SSH)
-set repoURL to "https://github.com/deinbenutzername/deinrepo.git"
+-- GitHub ZIP-Download-URL des gewünschten Branches
+-- Format: https://github.com/<user>/<repo>/archive/refs/heads/<branch>.zip
+set zipURL to "https://github.com/greatkickoff/bms/archive/refs/heads/claude/bookmark-sync-website-JebqA.zip"
 
--- Lokaler Ordner, in den das Repository gespeichert werden soll
--- Beispiel: "/Users/deinname/Projekte/meinrepo"
-set localPath to "/Users/deinname/Projekte/meinrepo"
-
--- Name des Unterordners, den git beim Klonen anlegt (= Repository-Name)
--- Entspricht dem letzten Teil der URL ohne ".git"
-set repoFolderName to "meinrepo"
+-- Lokaler Speicherort für die ZIP-Datei (Downloads-Ordner des Benutzers)
+set downloadsFolder to (path to downloads folder as string)
+set downloadsFolderPOSIX to POSIX path of downloadsFolder
+-- Dateiname der ZIP, die curl speichern soll
+set zipFileName to "github-repo.zip"
+set zipFilePath to downloadsFolderPOSIX & zipFileName
 
 -- FTP-Serverdaten
 set ftpHost to "ftp.meinserver.de"   -- Hostname oder IP des FTP-Servers
 set ftpPort to "21"                  -- Standard-FTP-Port (meistens 21)
 set ftpUser to "ftp-benutzername"    -- FTP-Benutzername
 set ftpPassword to "ftp-passwort"    -- FTP-Passwort
-set ftpRemotePath to "/public_html/" -- Zielordner auf dem FTP-Server
+set ftpRemotePath to "/public_html/" -- Zielordner auf dem FTP-Server (mit Schrägstrich am Ende)
 
 
 -- ============================================================
--- SCHRITT 1: Prüfen, ob Git auf dem System installiert ist
+-- SCHRITT 1: ZIP-Datei von GitHub herunterladen
 -- ============================================================
+-- curl lädt die ZIP direkt aus der GitHub-URL herunter.
+-- Flags:
+--   -L  → folgt Weiterleitungen (GitHub leitet intern um)
+--   -o  → Ausgabedatei festlegen
+--   --fail → bricht bei HTTP-Fehlern (z. B. 404) ab statt leere Datei zu speichern
+
+display dialog "Lade Repository-ZIP von GitHub herunter…" & return & zipURL buttons {"OK"} default button "OK"
 
 try
-    do shell script "which git"
-on error
-    display dialog "Git ist nicht installiert. Bitte installiere Git von https://git-scm.com/ und starte das Skript erneut." buttons {"OK"} default button "OK" with icon stop
-    return
-end try
-
-
--- ============================================================
--- SCHRITT 2: Repository klonen oder aktualisieren
--- ============================================================
--- Wenn der Zielordner bereits existiert, wird „git pull" ausgeführt
--- (bestehende Dateien werden aktualisiert).
--- Andernfalls wird das Repository frisch geklont.
-
-set repoFullPath to localPath & "/" & repoFolderName
-
-try
-    -- Prüfen, ob der Repo-Ordner schon vorhanden ist
-    do shell script "test -d " & quoted form of repoFullPath & " && echo exists || echo missing"
-    set folderCheck to result
-
-    if folderCheck contains "exists" then
-        -- Ordner vorhanden → aktuellen Branch auf den neuesten Stand bringen
-        display dialog "Repo-Ordner gefunden. Führe 'git pull' aus..." buttons {"OK"} default button "OK"
-        do shell script "cd " & quoted form of repoFullPath & " && git pull 2>&1"
-        set gitOutput to result
-        display dialog "git pull abgeschlossen:" & return & gitOutput buttons {"OK"} default button "OK"
-    else
-        -- Ordner nicht vorhanden → Zielverzeichnis anlegen und klonen
-        display dialog "Kein vorhandener Ordner gefunden. Führe 'git clone' aus..." buttons {"OK"} default button "OK"
-        do shell script "mkdir -p " & quoted form of localPath
-        do shell script "cd " & quoted form of localPath & " && git clone " & quoted form of repoURL & " 2>&1"
-        set gitOutput to result
-        display dialog "git clone abgeschlossen:" & return & gitOutput buttons {"OK"} default button "OK"
-    end if
-
+    do shell script "curl -L --fail --silent --show-error" & ¬
+        " -o " & quoted form of zipFilePath & ¬
+        " " & quoted form of zipURL & ¬
+        " 2>&1"
 on error errMsg
-    display dialog "Fehler beim Git-Vorgang:" & return & errMsg buttons {"OK"} default button "OK" with icon stop
+    display dialog "Fehler beim Download:" & return & errMsg buttons {"OK"} default button "OK" with icon stop
+    return
+end try
+
+display dialog "Download abgeschlossen:" & return & zipFilePath buttons {"OK"} default button "OK"
+
+
+-- ============================================================
+-- SCHRITT 2: ZIP im Downloads-Ordner entpacken
+-- ============================================================
+-- „unzip" ist auf macOS vorinstalliert.
+-- Flags:
+--   -o  → vorhandene Dateien ohne Rückfrage überschreiben
+--   -d  → Zielordner angeben (= Downloads-Ordner)
+-- GitHub packt alles in einen Unterordner wie „reponame-branchname",
+-- dieser wird automatisch im Downloads-Ordner erstellt.
+
+display dialog "Entpacke ZIP-Datei in:" & return & downloadsFolderPOSIX buttons {"OK"} default button "OK"
+
+try
+    do shell script "unzip -o " & quoted form of zipFilePath & ¬
+        " -d " & quoted form of downloadsFolderPOSIX & ¬
+        " 2>&1"
+    set unzipOutput to result
+on error errMsg
+    display dialog "Fehler beim Entpacken:" & return & errMsg buttons {"OK"} default button "OK" with icon stop
     return
 end try
 
 
 -- ============================================================
--- SCHRITT 3: Lokale Dateien via FTP hochladen
+-- SCHRITT 3: Entpackten Ordnernamen ermitteln
 -- ============================================================
--- curl wird benutzt, das auf macOS vorinstalliert ist.
--- „--ftp-create-dirs" legt fehlende Verzeichnisse auf dem Server an.
--- „-r" (recursive) lädt alle Unterordner mit hoch.
--- Das Passwort wird über eine Umgebungsvariable übergeben, damit es
--- nicht im Prozess-Monitor als Klartext auftaucht.
+-- GitHub benennt den Ordner innerhalb der ZIP immer nach dem Schema
+-- „<reponame>-<branchname>". Wir lesen den tatsächlichen Namen aus,
+-- anstatt ihn hart zu kodieren.
 
-display dialog "Starte FTP-Upload nach " & ftpHost & ftpRemotePath & "..." buttons {"OK"} default button "OK"
+try
+    -- Oberstes Verzeichnis in der ZIP auslesen (erste Zeile nach Header)
+    do shell script "unzip -Z1 " & quoted form of zipFilePath & " | head -1 | cut -d'/' -f1"
+    set extractedFolderName to result
+    set extractedFolderPath to downloadsFolderPOSIX & extractedFolderName
+on error errMsg
+    display dialog "Fehler beim Ermitteln des Ordnernamens:" & return & errMsg buttons {"OK"} default button "OK" with icon stop
+    return
+end try
 
--- FTP-URL zusammenbauen (Format: ftp://host:port/pfad/)
+display dialog "Entpackter Ordner:" & return & extractedFolderPath buttons {"OK"} default button "OK"
+
+
+-- ============================================================
+-- SCHRITT 4: Gesamten Ordner via FTP hochladen
+-- ============================================================
+-- curl lädt jede Datei einzeln hoch und erhält dabei die Ordnerstruktur.
+-- „find" listet alle Dateien rekursiv auf.
+-- Der relative Pfad (ohne den lokalen Prefix) wird als FTP-Pfad verwendet,
+-- damit die Ordnerstruktur auf dem Server identisch ist.
+-- „--ftp-create-dirs" legt fehlende Unterordner auf dem Server automatisch an.
+
 set ftpURL to "ftp://" & ftpHost & ":" & ftpPort & ftpRemotePath
 
--- curl-Kommando für rekursiven FTP-Upload
--- Erklärung der Flags:
---   -u user:pass          → Zugangsdaten
---   --ftp-create-dirs     → Verzeichnisse auf dem Server anlegen falls nötig
---   -T "{datei}"          → Datei hochladen (wird weiter unten pro Datei aufgerufen)
---   --silent --show-error → Keine Fortschrittsbalken, aber Fehler anzeigen
-
--- Alle Dateien im Repository-Ordner mit „find" ermitteln und einzeln hochladen
--- Hinweis: Der .git-Ordner wird dabei übersprungen (kein Deployment von Git-Metadaten)
+display dialog "Starte FTP-Upload nach:" & return & ftpURL & return & return & "Quelle: " & extractedFolderPath buttons {"OK"} default button "OK"
 
 try
-    set uploadScript to "find " & quoted form of repoFullPath & ¬
-        " -type f ! -path '*/.git/*'" & ¬
+    -- Shell-Skript: alle Dateien im entpackten Ordner finden und einzeln hochladen
+    -- ${file#<prefix>/} schneidet den lokalen Pfad-Prefix ab → relativer Pfad
+    set uploadScript to "find " & quoted form of extractedFolderPath & ¬
+        " -type f" & ¬
         " | while IFS= read -r file; do" & ¬
-        "   relative=\"${file#" & repoFullPath & "/}\";" & ¬
-        "   dir=$(dirname \"$relative\");" & ¬
+        "   relative=\"${file#" & extractedFolderPath & "/}\";" & ¬
         "   curl --silent --show-error" & ¬
         "     -u " & quoted form of (ftpUser & ":" & ftpPassword) & ¬
         "     --ftp-create-dirs" & ¬
@@ -115,9 +127,12 @@ try
     set uploadOutput to result
 
     if uploadOutput is "" then
-        display dialog "FTP-Upload erfolgreich abgeschlossen!" & return & "Alle Dateien wurden nach " & ftpURL & " hochgeladen." buttons {"OK"} default button "OK" with icon note
+        display dialog "FTP-Upload erfolgreich abgeschlossen!" & return & ¬
+            "Alle Dateien wurden nach " & ftpURL & " hochgeladen." ¬
+            buttons {"OK"} default button "OK" with icon note
     else
-        display dialog "FTP-Upload abgeschlossen (mit Meldungen):" & return & uploadOutput buttons {"OK"} default button "OK"
+        display dialog "FTP-Upload abgeschlossen (mit Meldungen):" & return & uploadOutput ¬
+            buttons {"OK"} default button "OK"
     end if
 
 on error errMsg
@@ -127,8 +142,11 @@ end try
 
 
 -- ============================================================
--- SCHRITT 4: Abschluss-Meldung
+-- SCHRITT 5: Abschluss-Meldung
 -- ============================================================
 
-display dialog "Fertig! Das Repository wurde geklont/aktualisiert und auf den FTP-Server hochgeladen." ¬
+display dialog "Fertig!" & return & return & ¬
+    "✓ ZIP heruntergeladen: " & zipFilePath & return & ¬
+    "✓ Entpackt in: " & extractedFolderPath & return & ¬
+    "✓ Hochgeladen nach: " & ftpURL ¬
     buttons {"OK"} default button "OK" with icon note
